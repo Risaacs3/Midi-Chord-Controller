@@ -1,0 +1,139 @@
+#include <Bounce.h>
+#include <Encoder.h>
+
+// Pin assignments
+const int chordPins[] = {2, 3, 4, 5, 6, 7, 8, 9};
+const int modePin = 14;  // Chord/Note toggle
+const int scalePin = 15; // Major/Minor toggle
+
+// Encoders
+Encoder keyEncoder(16, 17);     // Key transposition (semitones)
+Encoder octaveEncoder(20, 21);  // Octave shift
+
+// State variables
+bool chordMode = true;
+bool majorScale = true;
+const int baseRoot = 48; // C3
+int keyOffset = 0;
+int octaveOffset = 0;
+long lastKeyEnc = 0;
+long lastOctEnc = 0;
+const int numButtons = 8;
+bool isChordPlaying[numButtons] = {false};
+
+// Bounce setup
+Bounce chordButtons[numButtons] = {
+  Bounce(chordPins[0], 10), Bounce(chordPins[1], 10),
+  Bounce(chordPins[2], 10), Bounce(chordPins[3], 10),
+  Bounce(chordPins[4], 10), Bounce(chordPins[5], 10),
+  Bounce(chordPins[6], 10), Bounce(chordPins[7], 10)
+};
+
+Bounce modeBtn(modePin, 10);
+Bounce scaleBtn(scalePin, 10);
+
+// Diatonic chord intervals
+int majorChords[7][3] = {
+  {0, 4, 7}, {2, 5, 9}, {4, 7, 11},
+  {5, 9, 12}, {7, 11, 14}, {9, 12, 16}, {11, 14, 17}
+};
+
+int minorChords[7][3] = {
+  {0, 3, 7}, {2, 5, 8}, {3, 7, 10},
+  {5, 8, 12}, {7, 10, 14}, {8, 12, 15}, {10, 14, 17}
+};
+
+// Diatonic scale steps (note mode)
+int majorSteps[8] = {0, 2, 4, 5, 7, 9, 11, 12};
+int minorSteps[8] = {0, 2, 3, 5, 7, 8, 10, 12};
+
+void setup() {
+  for (int i = 0; i < numButtons; i++) {
+    pinMode(chordPins[i], INPUT_PULLUP);
+  }
+  pinMode(modePin, INPUT_PULLUP);
+  pinMode(scalePin, INPUT_PULLUP);
+  Serial.begin(9600);
+}
+
+void loop() {
+  modeBtn.update();
+  scaleBtn.update();
+  for (int i = 0; i < numButtons; i++) chordButtons[i].update();
+
+  // Toggle modes
+  if (modeBtn.fallingEdge()) {
+    chordMode = !chordMode;
+    Serial.println(chordMode ? "Chord mode" : "Note mode");
+  }
+
+  if (scaleBtn.fallingEdge()) {
+    majorScale = !majorScale;
+    Serial.println(majorScale ? "Major scale" : "Minor scale");
+  }
+
+  // Handle key encoder — unrestricted semitone shifting
+  long keyRaw = keyEncoder.read();
+  if (abs(keyRaw - lastKeyEnc) >= 4) {
+    int direction = (keyRaw > lastKeyEnc) ? -1 : 1;
+    keyOffset += direction;
+    Serial.print("Key offset (semitones): ");
+    Serial.println(keyOffset);
+    keyEncoder.write(0);
+    lastKeyEnc = 0;
+  }
+
+  // Handle octave encoder
+  long octRaw = octaveEncoder.read();
+  if (abs(octRaw - lastOctEnc) >= 4) {
+    int direction = (octRaw > lastOctEnc) ? 1 : -1;
+    octaveOffset = constrain(octaveOffset + direction, -4, 4);
+    Serial.print("Octave offset: ");
+    Serial.println(octaveOffset);
+    octaveEncoder.write(0);
+    lastOctEnc = 0;
+  }
+
+  // Playback logic
+  for (int i = 0; i < numButtons; i++) {
+    bool pressed = chordButtons[i].read() == LOW;
+
+    if (pressed && !isChordPlaying[i]) {
+      int rootNote = baseRoot + keyOffset + (octaveOffset * 12);
+
+      if (chordMode) {
+        if (i < 7) {
+          int* chord = majorScale ? majorChords[i] : minorChords[i];
+          usbMIDI.sendNoteOn(rootNote + chord[0], 100, 1);
+          usbMIDI.sendNoteOn(rootNote + chord[1], 100, 1);
+          usbMIDI.sendNoteOn(rootNote + chord[2], 100, 1);
+          Serial.print("Chord played: ");
+          Serial.println(rootNote + chord[0]);
+        } else if (i == 7) {
+          int* chord = majorScale ? majorChords[0] : minorChords[0];
+          usbMIDI.sendNoteOn(rootNote + 12 + chord[0], 100, 1);
+          usbMIDI.sendNoteOn(rootNote + 12 + chord[1], 100, 1);
+          usbMIDI.sendNoteOn(rootNote + 12 + chord[2], 100, 1);
+          Serial.println("Octave-up tonic chord played");
+        }
+      } else {
+        int step = majorScale ? majorSteps[i] : minorSteps[i];
+        int note = rootNote + step;
+        usbMIDI.sendNoteOn(note, 100, 1);
+        Serial.print("Note played: ");
+        Serial.println(note);
+      }
+
+      isChordPlaying[i] = true;
+    }
+
+    if (!pressed && isChordPlaying[i]) {
+      for (int note = 36; note <= 96; note++) {
+        usbMIDI.sendNoteOff(note, 0, 1);
+      }
+      isChordPlaying[i] = false;
+    }
+  }
+
+  delay(5);
+}
